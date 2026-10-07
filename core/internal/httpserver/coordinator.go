@@ -20,10 +20,12 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"strings"
 	"time"
 
+	_ "github.com/grafana/pyroscope-go/godeltaprof/http/pprof"
 	"github.com/julienschmidt/httprouter"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -129,6 +131,7 @@ func (hc *Coordinator) Configure() {
 	hc.router.GET("/burrow/admin/ready", hc.handleReady)
 
 	hc.router.Handler(http.MethodGet, "/metrics", hc.handlePrometheusMetrics())
+	hc.router.GET("/debug/pprof/*path", hc.handlePprof)
 
 	// All valid paths go here
 	hc.router.GET("/v3/kafka", hc.handleClusterList)
@@ -158,6 +161,10 @@ func (hc *Coordinator) Configure() {
 	hc.router.DELETE("/v3/kafka/:cluster/consumer/:consumer/topic/:topic", hc.handleConsumerDelete)
 	hc.router.GET("/v3/admin/loglevel", hc.getLogLevel)
 	hc.router.POST("/v3/admin/loglevel", hc.setLogLevel)
+}
+
+func (hc *Coordinator) handlePprof(w http.ResponseWriter, r *http.Request, _ httprouter.Params) {
+	http.DefaultServeMux.ServeHTTP(w, r)
 }
 
 // Start is responsible for starting the listener on each configured address. If any listener fails to start, the error
