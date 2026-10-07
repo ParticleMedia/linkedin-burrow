@@ -134,6 +134,26 @@ func TestHttpServer_setLogLevel(t *testing.T) {
 	assert.Equalf(t, zap.DebugLevel, coordinator.App.LogLevel.Level(), "Expected log level to be set to Debug, not %v", coordinator.App.LogLevel.Level().String())
 }
 
+func TestHttpServer_pprof(t *testing.T) {
+	coordinator := fixtureConfiguredCoordinator()
+
+	for _, path := range []string{
+		"/debug/pprof/",
+		"/debug/pprof/goroutine?debug=1",
+		"/debug/pprof/heap",
+		"/debug/pprof/cmdline",
+		"/debug/pprof/delta_heap",
+	} {
+		t.Run(path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, path, http.NoBody)
+			rr := httptest.NewRecorder()
+			coordinator.router.ServeHTTP(rr, req)
+			assert.Equal(t, http.StatusOK, rr.Code)
+			assert.NotEmpty(t, rr.Body.String())
+		})
+	}
+}
+
 func TestHttpServer_DefaultHandler(t *testing.T) {
 	coordinator := fixtureConfiguredCoordinator()
 
