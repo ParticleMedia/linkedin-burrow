@@ -426,10 +426,6 @@ func (module *KafkaZkClient) resetOffsetWatchAndSend(group, topic string, partit
 
 	// Get the current offset and reset our watch
 	offsetString, offsetStat, offsetEventChan, err := module.zk.GetW(module.zookeeperPath + "/" + group + "/offsets/" + topic + "/" + strconv.FormatInt(int64(partition), 10))
-
-	// Get the current owner of the partition
-	consumerID, _, _, _ := module.zk.GetW(module.zookeeperPath + "/" + group + "/owners/" + topic + "/" + strconv.FormatInt(int64(partition), 10)) // nolint:dogsled
-
 	if err != nil {
 		// Can't read the partition offset path. Bail for now
 		module.Log.Warn("failed to read offset",
@@ -455,6 +451,18 @@ func (module *KafkaZkClient) resetOffsetWatchAndSend(group, topic string, partit
 				zap.String("error", err.Error()),
 			)
 			return
+		}
+
+		// Read the current owner without setting a watch; offset changes trigger the next read.
+		consumerID, _, ownerErr := module.zk.Get(module.zookeeperPath + "/" + group + "/owners/" + topic + "/" + strconv.FormatInt(int64(partition), 10))
+		if ownerErr != nil {
+			module.Log.Debug("failed to read owner",
+				zap.String("group", group),
+				zap.String("topic", topic),
+				zap.Int32("partition", partition),
+				zap.Error(ownerErr),
+			)
+			consumerID = nil
 		}
 
 		// Send the offset to the storage module

@@ -110,6 +110,11 @@ func (z *BurrowZookeeperClient) GetW(path string) ([]byte, *zk.Stat, <-chan zk.E
 	return z.client.GetW(path)
 }
 
+// Get returns the data and stat for a ZNode without setting a watch.
+func (z *BurrowZookeeperClient) Get(path string) ([]byte, *zk.Stat, error) {
+	return z.client.Get(path)
+}
+
 // Exists returns a boolean stating whether or not the specified path exists.
 func (z *BurrowZookeeperClient) Exists(path string) (bool, *zk.Stat, error) {
 	return z.client.Exists(path)
@@ -173,6 +178,12 @@ func (m *MockZookeeperClient) ChildrenW(path string) ([]string, *zk.Stat, <-chan
 func (m *MockZookeeperClient) GetW(path string) ([]byte, *zk.Stat, <-chan zk.Event, error) {
 	args := m.Called(path)
 	return args.Get(0).([]byte), args.Get(1).(*zk.Stat), args.Get(2).(<-chan zk.Event), args.Error(3)
+}
+
+// Get mocks protocol.ZookeeperClient.Get
+func (m *MockZookeeperClient) Get(path string) ([]byte, *zk.Stat, error) {
+	args := m.Called(path)
+	return args.Get(0).([]byte), args.Get(1).(*zk.Stat), args.Error(2)
 }
 
 // Exists mocks protocol.ZookeeperClient.Exists
