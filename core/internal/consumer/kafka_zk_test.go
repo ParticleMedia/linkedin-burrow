@@ -11,6 +11,7 @@ package consumer
 
 import (
 	"errors"
+	"strconv"
 	"time"
 
 	"testing"
@@ -114,7 +115,7 @@ func TestKafkaZkClient_watchGroupList(t *testing.T) {
 	mockZookeeper.On("ExistsW", "/consumers/testgroup/offsets").Return(true, offsetStat, func() <-chan zk.Event { return topicExistsChan }(), nil)
 	mockZookeeper.On("ChildrenW", "/consumers/testgroup/offsets/testtopic").Return([]string{"0"}, offsetStat, func() <-chan zk.Event { return newPartitionChan }(), nil)
 	mockZookeeper.On("GetW", "/consumers/testgroup/offsets/testtopic/0").Return([]byte("81234"), offsetStat, func() <-chan zk.Event { return newOffsetChan }(), nil)
-	mockZookeeper.On("GetW", "/consumers/testgroup/owners/testtopic/0").Return([]byte("testowner"), offsetStat, func() <-chan zk.Event { return newOffsetChan }(), nil)
+	mockZookeeper.On("Get", "/consumers/testgroup/owners/testtopic/0").Return([]byte("testowner"), offsetStat, nil)
 
 	watchEventChan := make(chan zk.Event)
 
@@ -178,7 +179,6 @@ func TestKafkaZkClient_watchGroupList(t *testing.T) {
 func TestKafkaZkClient_resetOffsetWatchAndSend_BadPath(t *testing.T) {
 	mockZookeeper := helpers.MockZookeeperClient{}
 	mockZookeeper.On("GetW", "/consumers/testgroup/offsets/testtopic/0").Return([]byte("81234"), (*zk.Stat)(nil), (<-chan zk.Event)(nil), errors.New("badpath")) // nolint:gocritic
-	mockZookeeper.On("GetW", "/consumers/testgroup/owners/testtopic/0").Return([]byte("testowner"), (*zk.Stat)(nil), (<-chan zk.Event)(nil), nil)                // nolint:gocritic
 
 	module := fixtureKafkaZkModule()
 	module.Configure("test", "consumer.test")
@@ -199,7 +199,6 @@ func TestKafkaZkClient_resetOffsetWatchAndSend_BadOffset(t *testing.T) {
 	offsetStat := &zk.Stat{Mtime: 894859}
 	newWatchEventChan := make(chan zk.Event)
 	mockZookeeper.On("GetW", "/consumers/testgroup/offsets/testtopic/0").Return([]byte("notanumber"), offsetStat, func() <-chan zk.Event { return newWatchEventChan }(), nil)
-	mockZookeeper.On("GetW", "/consumers/testgroup/owners/testtopic/0").Return([]byte("testowner"), (*zk.Stat)(nil), (<-chan zk.Event)(nil), nil) // nolint:gocritic
 
 	// This will block if a storage request is sent, as nothing is watching that channel
 	module.running.Add(1)
@@ -213,6 +212,74 @@ func TestKafkaZkClient_resetOffsetWatchAndSend_BadOffset(t *testing.T) {
 	}
 
 	mockZookeeper.AssertExpectations(t)
+}
+
+func TestKafkaZkClient_resetOffsetWatchAndSend_MissingOwner(t *testing.T) {
+	mockZookeeper := helpers.MockZookeeperClient{}
+	module := fixtureKafkaZkModule()
+	module.Configure("test", "consumer.test")
+	module.zk = &mockZookeeper
+	module.App.StorageChannel = make(chan *protocol.StorageRequest, 2)
+
+	offsetEventChan := make(chan zk.Event, 1)
+	mockZookeeper.On("GetW", "/consumers/testgroup/offsets/testtopic/0").Return([]byte("81234"), &zk.Stat{Mtime: 894859}, (<-chan zk.Event)(offsetEventChan), nil).Once()
+	mockZookeeper.On("Get", "/consumers/testgroup/owners/testtopic/0").Return([]byte(nil), (*zk.Stat)(nil), zk.ErrNoNode).Once()
+
+	module.running.Add(1)
+	module.resetOffsetWatchAndSend("testgroup", "testtopic", 0, false)
+	assert.Equal(t, protocol.StorageSetConsumerOffset, (<-module.App.StorageChannel).RequestType)
+	owner := <-module.App.StorageChannel
+	assert.Equal(t, protocol.StorageSetConsumerOwner, owner.RequestType)
+	assert.Empty(t, owner.Owner)
+
+	offsetEventChan <- zk.Event{Type: zk.EventNotWatching}
+	module.running.Wait()
+	mockZookeeper.AssertExpectations(t)
+	mockZookeeper.AssertNotCalled(t, "GetW", "/consumers/testgroup/owners/testtopic/0")
+}
+
+func TestKafkaZkClient_resetOffsetWatchAndSend_StableOwner(t *testing.T) {
+	mockZookeeper := helpers.MockZookeeperClient{}
+	module := fixtureKafkaZkModule()
+	module.Configure("test", "consumer.test")
+	module.zk = &mockZookeeper
+	module.App.StorageChannel = make(chan *protocol.StorageRequest, 6)
+
+	offsetPath := "/consumers/testgroup/offsets/testtopic/0"
+	ownerPath := "/consumers/testgroup/owners/testtopic/0"
+	offsetEvents := []chan zk.Event{make(chan zk.Event, 1), make(chan zk.Event, 1), make(chan zk.Event, 1)}
+	for i, eventChan := range offsetEvents {
+		mockZookeeper.On("GetW", offsetPath).Return([]byte(strconv.Itoa(81234+i)), &zk.Stat{Mtime: 894859}, (<-chan zk.Event)(eventChan), nil).Once()
+	}
+	mockZookeeper.On("Get", ownerPath).Return([]byte("testowner"), &zk.Stat{}, nil).Times(len(offsetEvents))
+
+	module.running.Add(1)
+	module.resetOffsetWatchAndSend("testgroup", "testtopic", 0, false)
+	for i, eventChan := range offsetEvents {
+		for _, requestType := range []protocol.StorageRequestConstant{protocol.StorageSetConsumerOffset, protocol.StorageSetConsumerOwner} {
+			select {
+			case request := <-module.App.StorageChannel:
+				assert.Equal(t, requestType, request.RequestType)
+				if requestType == protocol.StorageSetConsumerOffset {
+					assert.Equal(t, int64(81234+i), request.Offset)
+				} else {
+					assert.Equal(t, "testowner", request.Owner)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for consumer storage request")
+			}
+		}
+		if i+1 < len(offsetEvents) {
+			eventChan <- zk.Event{Type: zk.EventNodeDataChanged}
+		} else {
+			eventChan <- zk.Event{Type: zk.EventNotWatching}
+		}
+	}
+	module.running.Wait()
+	mockZookeeper.AssertExpectations(t)
+	mockZookeeper.AssertNumberOfCalls(t, "GetW", len(offsetEvents))
+	mockZookeeper.AssertNumberOfCalls(t, "Get", len(offsetEvents))
+	mockZookeeper.AssertNotCalled(t, "GetW", ownerPath)
 }
 
 func TestKafkaZkClient_resetPartitionListWatchAndAdd_BadPath(t *testing.T) {
